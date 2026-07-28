@@ -459,10 +459,63 @@ namespace Hooks
 		}
 	}
 
+	// TEST BUILD ONLY. The output encode in Copy_ps.hlsl only runs when IsAtEndOfFrame is set, so a
+	// frame whose final copy never sees that flag loses its SDR gamma / HDR PQ conversion entirely.
+	// Menus are blown out in both display modes, which is what that would look like. Count the
+	// passes so we can tell "Copy never runs on menu frames" apart from "it runs with the flag off".
+	static std::atomic<uint32_t> diagFrames{ 0 };
+	static std::atomic<uint32_t> diagCopyTotal{ 0 };
+	static std::atomic<uint32_t> diagCopyAtEndOfFrame{ 0 };
+	static std::atomic<uint32_t> diagHdrComposite{ 0 };
+	static std::atomic<uint32_t> diagScaleform{ 0 };
+	// The Copy pass turned out never to be dispatched, so record any Copy-family technique the game
+	// does run that we don't handle - 1.16.244 has seven permutations of it and the bits that select
+	// the output format may not be the ones these shaders were built against.
+	static std::atomic<uint64_t> diagUnhandledCopyId{ 0 };
+	static std::atomic<uint32_t> diagUnhandledCopyCount{ 0 };
+	// No Copy-family technique is dispatched at all, so the output encode has to move to a pass that
+	// actually runs. Count the rest of the techniques we patch to find one that covers every frame.
+	static std::atomic<uint32_t> diagPostSharpen{ 0 };
+	static std::atomic<uint32_t> diagFilmGrain{ 0 };
+	static std::atomic<uint32_t> diagColorGradingMerge{ 0 };
+	static std::atomic<uint32_t> diagCAS{ 0 };
+	static std::atomic<uint32_t> diagBink{ 0 };
+
+	// Nothing in the Copy family runs any more, so whatever performs the final present on 1.16.244
+	// is a technique this plugin has never heard of. Record the distinct techniques dispatched while
+	// the end of frame flag is set - that names the pass the output encode has to move into.
+	static constexpr size_t      diagMaxEofTechniques = 12;
+	static std::atomic<uint64_t> diagEofTechniques[diagMaxEofTechniques]{};
+	// Nothing at all is dispatched inside the end of frame window. Either the window never opens
+	// (the EndOfFrame hook offset is wrong for this build) or it opens after every draw is done
+	// (the final present is not a shader pass). Count both to tell those apart.
+	static std::atomic<uint32_t> diagEndOfFrameHookCalls{ 0 };
+	static std::atomic<uint32_t> diagFlagSetAtPost{ 0 };
+	static std::atomic<uint32_t> diagTotalDraws{ 0 };
+
     void Hooks::UploadRootConstants(void* a_renderGraph, void* a2)
     {
 		const auto technique = *reinterpret_cast<uintptr_t*>(reinterpret_cast<uintptr_t>(a2) + 0x8);
 		const auto techniqueId = *reinterpret_cast<uint64_t*>(technique + 0x68);
+
+		diagTotalDraws.fetch_add(1, std::memory_order_relaxed);
+
+		if ((techniqueId & 0xFFFFF) == 0x1FE57 && techniqueId != 0x801FE57 && techniqueId != 0x4001FE57) {
+			diagUnhandledCopyId.store(techniqueId, std::memory_order_relaxed);
+			diagUnhandledCopyCount.fetch_add(1, std::memory_order_relaxed);
+		}
+
+		if (techniqueId != 0 && Settings::Main::GetSingleton()->IsAtEndOfFrame()) {
+			for (auto& slot : diagEofTechniques) {
+				uint64_t cur = slot.load(std::memory_order_relaxed);
+				if (cur == techniqueId) {
+					break;
+				}
+				if (cur == 0 && slot.compare_exchange_strong(cur, techniqueId, std::memory_order_relaxed)) {
+					break;
+				}
+			}
+		}
 
 		auto uploadRootConstants = [&](const Settings::ShaderConstants& a_shaderConstants, uint32_t a_rootParameterIndex, bool a_bCompute) {
 			auto commandList = *reinterpret_cast<ID3D12GraphicsCommandList**>(reinterpret_cast<uintptr_t>(a_renderGraph) + 0x60);
@@ -488,6 +541,7 @@ namespace Hooks
 			{
 				Settings::ShaderConstants shaderConstants;
 				Settings::Main::GetSingleton()->GetShaderConstants(shaderConstants, Settings::ShaderConstantsMode::kLUT);
+				diagHdrComposite.fetch_add(1, std::memory_order_relaxed);
 				uploadRootConstants(shaderConstants, 5, false);  // HDRComposite
 				break;
 			}
@@ -497,6 +551,10 @@ namespace Hooks
 			{
 				Settings::ShaderConstants shaderConstants;
 				Settings::Main::GetSingleton()->GetShaderConstants(shaderConstants);
+				diagCopyTotal.fetch_add(1, std::memory_order_relaxed);
+				if (shaderConstants.bIsAtEndOfFrame) {
+					diagCopyAtEndOfFrame.fetch_add(1, std::memory_order_relaxed);
+				}
 				uploadRootConstants(shaderConstants, 2, false);  // Copy
 				break;
 			}
@@ -505,6 +563,7 @@ namespace Hooks
 			{
 				Settings::ShaderConstants shaderConstants;
 				Settings::Main::GetSingleton()->GetShaderConstants(shaderConstants);
+				diagFilmGrain.fetch_add(1, std::memory_order_relaxed);
 				uploadRootConstants(shaderConstants, 2, false);  // FilmGrain
 				break;
 			}
@@ -514,6 +573,7 @@ namespace Hooks
 			{
 				Settings::ShaderConstants shaderConstants;
 				Settings::Main::GetSingleton()->GetShaderConstants(shaderConstants, Settings::ShaderConstantsMode::kLUT);
+				diagColorGradingMerge.fetch_add(1, std::memory_order_relaxed);
 				uploadRootConstants(shaderConstants, 4, true);  // ColorGradingMerge / HDRColorGradingMerge
 				break;
 			}
@@ -525,6 +585,7 @@ namespace Hooks
 			{
 				Settings::ShaderConstants shaderConstants;
 				Settings::Main::GetSingleton()->GetShaderConstants(shaderConstants);
+				diagCAS.fetch_add(1, std::memory_order_relaxed);
 				uploadRootConstants(shaderConstants, 4, true);  // ContrastAdaptiveSharpening
 				break;
 			}
@@ -533,6 +594,7 @@ namespace Hooks
 			{
 				Settings::ShaderConstants shaderConstants;
 				Settings::Main::GetSingleton()->GetShaderConstants(shaderConstants);
+				diagPostSharpen.fetch_add(1, std::memory_order_relaxed);
 				uploadRootConstants(shaderConstants, 5, false);  // PostSharpen
 				break;
 			}
@@ -541,6 +603,7 @@ namespace Hooks
 			{
 				Settings::ShaderConstants shaderConstants;
 				Settings::Main::GetSingleton()->GetShaderConstants(shaderConstants);
+				diagScaleform.fetch_add(1, std::memory_order_relaxed);
 				uploadRootConstants(shaderConstants, 2, false);  // ScaleformComposite
 				break;
 			}
@@ -549,6 +612,7 @@ namespace Hooks
 			{
 				Settings::ShaderConstants shaderConstants;
 				Settings::Main::GetSingleton()->GetShaderConstants(shaderConstants);
+				diagBink.fetch_add(1, std::memory_order_relaxed);
 				uploadRootConstants(shaderConstants, 2, false);  // BinkMovie
 				break;
 			}
@@ -920,12 +984,16 @@ namespace Hooks
 
     void Hooks::Hook_EndOfFrame(void* a1, void* a2, const char* a3)
     {
+		diagEndOfFrameHookCalls.fetch_add(1, std::memory_order_relaxed);
 		Settings::Main::GetSingleton()->SetAtEndOfFrame(true);
 		_EndOfFrame(a1, a2, a3);
     }
 
     void Hooks::Hook_PostEndOfFrame(void* a1)
     {
+		if (Settings::Main::GetSingleton()->IsAtEndOfFrame()) {
+			diagFlagSetAtPost.fetch_add(1, std::memory_order_relaxed);
+		}
 		_PostEndOfFrame(a1);
 		Settings::Main::GetSingleton()->SetAtEndOfFrame(false);
 
@@ -933,11 +1001,49 @@ namespace Hooks
 		// otherwise if moving the game between SDR and HDR screens, it could end up staying grayed out, or not graying out.
 		// Note that toggling between windowed and borderless also automatically refreshes this as it re-creates the swapchain.
 		static bool wasInPauseMenu = false;
-		if (!wasInPauseMenu && (Utils::IsInPauseMenu() || Utils::IsInMainMenu())) {
+		const bool inMenu = Utils::IsInPauseMenu() || Utils::IsInMainMenu();
+		if (!wasInPauseMenu && inMenu) {
 			Settings::Main::GetSingleton()->RefreshHDRDisplaySupportState();
 			wasInPauseMenu = true;
-		} else if (wasInPauseMenu && !(Utils::IsInPauseMenu() || Utils::IsInMainMenu())) {
+		} else if (wasInPauseMenu && !inMenu) {
 			wasInPauseMenu = false;
+		}
+
+		// TEST BUILD ONLY. Report the pass counts once a second or so, and immediately whenever the
+		// menu state flips, so the menu frames can be compared against the in-game ones.
+		static bool     diagWasInMenu = false;
+		static uint32_t diagLastReportFrame = 0;
+		const auto      frame = diagFrames.fetch_add(1, std::memory_order_relaxed) + 1;
+
+		if (inMenu != diagWasInMenu || frame - diagLastReportFrame >= 60) {
+			INFO("Diag: frame {} inMenu={} HDRComposite={} Copy={} Scaleform={} PostSharpen={} FilmGrain={} CGM={} CAS={} Bink={} unhandledCopy={:#x} x{}",
+				frame, inMenu,
+				diagHdrComposite.exchange(0, std::memory_order_relaxed),
+				diagCopyTotal.exchange(0, std::memory_order_relaxed),
+				diagScaleform.exchange(0, std::memory_order_relaxed),
+				diagPostSharpen.exchange(0, std::memory_order_relaxed),
+				diagFilmGrain.exchange(0, std::memory_order_relaxed),
+				diagColorGradingMerge.exchange(0, std::memory_order_relaxed),
+				diagCAS.exchange(0, std::memory_order_relaxed),
+				diagBink.exchange(0, std::memory_order_relaxed),
+				diagUnhandledCopyId.load(std::memory_order_relaxed),
+				diagUnhandledCopyCount.exchange(0, std::memory_order_relaxed))
+			diagCopyAtEndOfFrame.store(0, std::memory_order_relaxed);
+
+			std::string eofTechniques;
+			for (auto& slot : diagEofTechniques) {
+				const auto id = slot.exchange(0, std::memory_order_relaxed);
+				if (id != 0) {
+					eofTechniques += fmt::format("{:#x} ", id);
+				}
+			}
+			INFO("Diag: endOfFrame techniques: {} | EndOfFrameHookCalls={} flagStillSetAtPost={} totalDraws={}",
+				eofTechniques.empty() ? "(none)" : eofTechniques,
+				diagEndOfFrameHookCalls.exchange(0, std::memory_order_relaxed),
+				diagFlagSetAtPost.exchange(0, std::memory_order_relaxed),
+				diagTotalDraws.exchange(0, std::memory_order_relaxed))
+			diagWasInMenu = inMenu;
+			diagLastReportFrame = frame;
 		}
     }
 
