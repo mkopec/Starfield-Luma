@@ -486,11 +486,19 @@ namespace Hooks
 	// the end of frame flag is set - that names the pass the output encode has to move into.
 	static constexpr size_t      diagMaxEofTechniques = 12;
 	static std::atomic<uint64_t> diagEofTechniques[diagMaxEofTechniques]{};
+	// Nothing at all is dispatched inside the end of frame window. Either the window never opens
+	// (the EndOfFrame hook offset is wrong for this build) or it opens after every draw is done
+	// (the final present is not a shader pass). Count both to tell those apart.
+	static std::atomic<uint32_t> diagEndOfFrameHookCalls{ 0 };
+	static std::atomic<uint32_t> diagFlagSetAtPost{ 0 };
+	static std::atomic<uint32_t> diagTotalDraws{ 0 };
 
     void Hooks::UploadRootConstants(void* a_renderGraph, void* a2)
     {
 		const auto technique = *reinterpret_cast<uintptr_t*>(reinterpret_cast<uintptr_t>(a2) + 0x8);
 		const auto techniqueId = *reinterpret_cast<uint64_t*>(technique + 0x68);
+
+		diagTotalDraws.fetch_add(1, std::memory_order_relaxed);
 
 		if ((techniqueId & 0xFFFFF) == 0x1FE57 && techniqueId != 0x801FE57 && techniqueId != 0x4001FE57) {
 			diagUnhandledCopyId.store(techniqueId, std::memory_order_relaxed);
@@ -976,12 +984,16 @@ namespace Hooks
 
     void Hooks::Hook_EndOfFrame(void* a1, void* a2, const char* a3)
     {
+		diagEndOfFrameHookCalls.fetch_add(1, std::memory_order_relaxed);
 		Settings::Main::GetSingleton()->SetAtEndOfFrame(true);
 		_EndOfFrame(a1, a2, a3);
     }
 
     void Hooks::Hook_PostEndOfFrame(void* a1)
     {
+		if (Settings::Main::GetSingleton()->IsAtEndOfFrame()) {
+			diagFlagSetAtPost.fetch_add(1, std::memory_order_relaxed);
+		}
 		_PostEndOfFrame(a1);
 		Settings::Main::GetSingleton()->SetAtEndOfFrame(false);
 
@@ -1025,7 +1037,11 @@ namespace Hooks
 					eofTechniques += fmt::format("{:#x} ", id);
 				}
 			}
-			INFO("Diag: endOfFrame techniques: {}", eofTechniques.empty() ? "(none)" : eofTechniques)
+			INFO("Diag: endOfFrame techniques: {} | EndOfFrameHookCalls={} flagStillSetAtPost={} totalDraws={}",
+				eofTechniques.empty() ? "(none)" : eofTechniques,
+				diagEndOfFrameHookCalls.exchange(0, std::memory_order_relaxed),
+				diagFlagSetAtPost.exchange(0, std::memory_order_relaxed),
+				diagTotalDraws.exchange(0, std::memory_order_relaxed))
 			diagWasInMenu = inMenu;
 			diagLastReportFrame = frame;
 		}
