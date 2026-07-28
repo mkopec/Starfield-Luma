@@ -22,7 +22,9 @@
 // If true, SDR will be kept in linear space until the final out.
 // This is desired for output quality as we store colors on float buffers, which are based kept in linear space,
 // it also simplifies the code and optmizes performance, and the Scaleform UI still blends in in gamma space (with a custom function).
-#define SDR_LINEAR_INTERMEDIARY (FORCE_VANILLA_LOOK ? 0 : 1)
+// TEST BUILD: forced to 0 to move the SDR gamma encode out of the Copy shader and back into
+// HDRComposite, to work out which side of that hand-off is blowing out SDR on 1.16.244.
+#define SDR_LINEAR_INTERMEDIARY 0
 
 // Determines what kind of color space/gamut/gamma the merged/mixed LUT is in.
 // 0) sRGB gamma mapping (sRGB in, sRGB out) (Vanilla): the simplest and most mathematically correct way of mapping LUTs. Neutral LUTs should have a near zero quality loss and be mapped perfectly.
