@@ -467,11 +467,22 @@ namespace Hooks
 	static std::atomic<uint32_t> diagCopyTotal{ 0 };
 	static std::atomic<uint32_t> diagCopyAtEndOfFrame{ 0 };
 	static std::atomic<uint32_t> diagHdrComposite{ 0 };
+	static std::atomic<uint32_t> diagScaleform{ 0 };
+	// The Copy pass turned out never to be dispatched, so record any Copy-family technique the game
+	// does run that we don't handle - 1.16.244 has seven permutations of it and the bits that select
+	// the output format may not be the ones these shaders were built against.
+	static std::atomic<uint64_t> diagUnhandledCopyId{ 0 };
+	static std::atomic<uint32_t> diagUnhandledCopyCount{ 0 };
 
     void Hooks::UploadRootConstants(void* a_renderGraph, void* a2)
     {
 		const auto technique = *reinterpret_cast<uintptr_t*>(reinterpret_cast<uintptr_t>(a2) + 0x8);
 		const auto techniqueId = *reinterpret_cast<uint64_t*>(technique + 0x68);
+
+		if ((techniqueId & 0xFFFFF) == 0x1FE57 && techniqueId != 0x801FE57 && techniqueId != 0x4001FE57) {
+			diagUnhandledCopyId.store(techniqueId, std::memory_order_relaxed);
+			diagUnhandledCopyCount.fetch_add(1, std::memory_order_relaxed);
+		}
 
 		auto uploadRootConstants = [&](const Settings::ShaderConstants& a_shaderConstants, uint32_t a_rootParameterIndex, bool a_bCompute) {
 			auto commandList = *reinterpret_cast<ID3D12GraphicsCommandList**>(reinterpret_cast<uintptr_t>(a_renderGraph) + 0x60);
@@ -555,6 +566,7 @@ namespace Hooks
 			{
 				Settings::ShaderConstants shaderConstants;
 				Settings::Main::GetSingleton()->GetShaderConstants(shaderConstants);
+				diagScaleform.fetch_add(1, std::memory_order_relaxed);
 				uploadRootConstants(shaderConstants, 2, false);  // ScaleformComposite
 				break;
 			}
@@ -962,11 +974,14 @@ namespace Hooks
 		const auto      frame = diagFrames.fetch_add(1, std::memory_order_relaxed) + 1;
 
 		if (inMenu != diagWasInMenu || frame - diagLastReportFrame >= 60) {
-			INFO("Diag: frame {} inMenu={} HDRComposite={} Copy={} CopyAtEndOfFrame={}",
+			INFO("Diag: frame {} inMenu={} HDRComposite={} Copy={} CopyAtEndOfFrame={} Scaleform={} unhandledCopy={:#x} x{}",
 				frame, inMenu,
 				diagHdrComposite.exchange(0, std::memory_order_relaxed),
 				diagCopyTotal.exchange(0, std::memory_order_relaxed),
-				diagCopyAtEndOfFrame.exchange(0, std::memory_order_relaxed))
+				diagCopyAtEndOfFrame.exchange(0, std::memory_order_relaxed),
+				diagScaleform.exchange(0, std::memory_order_relaxed),
+				diagUnhandledCopyId.load(std::memory_order_relaxed),
+				diagUnhandledCopyCount.exchange(0, std::memory_order_relaxed))
 			diagWasInMenu = inMenu;
 			diagLastReportFrame = frame;
 		}
