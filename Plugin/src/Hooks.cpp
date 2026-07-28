@@ -459,6 +459,15 @@ namespace Hooks
 		}
 	}
 
+	// TEST BUILD ONLY. The output encode in Copy_ps.hlsl only runs when IsAtEndOfFrame is set, so a
+	// frame whose final copy never sees that flag loses its SDR gamma / HDR PQ conversion entirely.
+	// Menus are blown out in both display modes, which is what that would look like. Count the
+	// passes so we can tell "Copy never runs on menu frames" apart from "it runs with the flag off".
+	static std::atomic<uint32_t> diagFrames{ 0 };
+	static std::atomic<uint32_t> diagCopyTotal{ 0 };
+	static std::atomic<uint32_t> diagCopyAtEndOfFrame{ 0 };
+	static std::atomic<uint32_t> diagHdrComposite{ 0 };
+
     void Hooks::UploadRootConstants(void* a_renderGraph, void* a2)
     {
 		const auto technique = *reinterpret_cast<uintptr_t*>(reinterpret_cast<uintptr_t>(a2) + 0x8);
@@ -488,6 +497,7 @@ namespace Hooks
 			{
 				Settings::ShaderConstants shaderConstants;
 				Settings::Main::GetSingleton()->GetShaderConstants(shaderConstants, Settings::ShaderConstantsMode::kLUT);
+				diagHdrComposite.fetch_add(1, std::memory_order_relaxed);
 				uploadRootConstants(shaderConstants, 5, false);  // HDRComposite
 				break;
 			}
@@ -497,6 +507,10 @@ namespace Hooks
 			{
 				Settings::ShaderConstants shaderConstants;
 				Settings::Main::GetSingleton()->GetShaderConstants(shaderConstants);
+				diagCopyTotal.fetch_add(1, std::memory_order_relaxed);
+				if (shaderConstants.bIsAtEndOfFrame) {
+					diagCopyAtEndOfFrame.fetch_add(1, std::memory_order_relaxed);
+				}
 				uploadRootConstants(shaderConstants, 2, false);  // Copy
 				break;
 			}
@@ -933,11 +947,28 @@ namespace Hooks
 		// otherwise if moving the game between SDR and HDR screens, it could end up staying grayed out, or not graying out.
 		// Note that toggling between windowed and borderless also automatically refreshes this as it re-creates the swapchain.
 		static bool wasInPauseMenu = false;
-		if (!wasInPauseMenu && (Utils::IsInPauseMenu() || Utils::IsInMainMenu())) {
+		const bool inMenu = Utils::IsInPauseMenu() || Utils::IsInMainMenu();
+		if (!wasInPauseMenu && inMenu) {
 			Settings::Main::GetSingleton()->RefreshHDRDisplaySupportState();
 			wasInPauseMenu = true;
-		} else if (wasInPauseMenu && !(Utils::IsInPauseMenu() || Utils::IsInMainMenu())) {
+		} else if (wasInPauseMenu && !inMenu) {
 			wasInPauseMenu = false;
+		}
+
+		// TEST BUILD ONLY. Report the pass counts once a second or so, and immediately whenever the
+		// menu state flips, so the menu frames can be compared against the in-game ones.
+		static bool     diagWasInMenu = false;
+		static uint32_t diagLastReportFrame = 0;
+		const auto      frame = diagFrames.fetch_add(1, std::memory_order_relaxed) + 1;
+
+		if (inMenu != diagWasInMenu || frame - diagLastReportFrame >= 60) {
+			INFO("Diag: frame {} inMenu={} HDRComposite={} Copy={} CopyAtEndOfFrame={}",
+				frame, inMenu,
+				diagHdrComposite.exchange(0, std::memory_order_relaxed),
+				diagCopyTotal.exchange(0, std::memory_order_relaxed),
+				diagCopyAtEndOfFrame.exchange(0, std::memory_order_relaxed))
+			diagWasInMenu = inMenu;
+			diagLastReportFrame = frame;
 		}
     }
 
