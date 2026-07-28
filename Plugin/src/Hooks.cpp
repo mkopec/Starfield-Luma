@@ -481,6 +481,12 @@ namespace Hooks
 	static std::atomic<uint32_t> diagCAS{ 0 };
 	static std::atomic<uint32_t> diagBink{ 0 };
 
+	// Nothing in the Copy family runs any more, so whatever performs the final present on 1.16.244
+	// is a technique this plugin has never heard of. Record the distinct techniques dispatched while
+	// the end of frame flag is set - that names the pass the output encode has to move into.
+	static constexpr size_t      diagMaxEofTechniques = 12;
+	static std::atomic<uint64_t> diagEofTechniques[diagMaxEofTechniques]{};
+
     void Hooks::UploadRootConstants(void* a_renderGraph, void* a2)
     {
 		const auto technique = *reinterpret_cast<uintptr_t*>(reinterpret_cast<uintptr_t>(a2) + 0x8);
@@ -489,6 +495,18 @@ namespace Hooks
 		if ((techniqueId & 0xFFFFF) == 0x1FE57 && techniqueId != 0x801FE57 && techniqueId != 0x4001FE57) {
 			diagUnhandledCopyId.store(techniqueId, std::memory_order_relaxed);
 			diagUnhandledCopyCount.fetch_add(1, std::memory_order_relaxed);
+		}
+
+		if (techniqueId != 0 && Settings::Main::GetSingleton()->IsAtEndOfFrame()) {
+			for (auto& slot : diagEofTechniques) {
+				uint64_t cur = slot.load(std::memory_order_relaxed);
+				if (cur == techniqueId) {
+					break;
+				}
+				if (cur == 0 && slot.compare_exchange_strong(cur, techniqueId, std::memory_order_relaxed)) {
+					break;
+				}
+			}
 		}
 
 		auto uploadRootConstants = [&](const Settings::ShaderConstants& a_shaderConstants, uint32_t a_rootParameterIndex, bool a_bCompute) {
@@ -999,6 +1017,15 @@ namespace Hooks
 				diagUnhandledCopyId.load(std::memory_order_relaxed),
 				diagUnhandledCopyCount.exchange(0, std::memory_order_relaxed))
 			diagCopyAtEndOfFrame.store(0, std::memory_order_relaxed);
+
+			std::string eofTechniques;
+			for (auto& slot : diagEofTechniques) {
+				const auto id = slot.exchange(0, std::memory_order_relaxed);
+				if (id != 0) {
+					eofTechniques += fmt::format("{:#x} ", id);
+				}
+			}
+			INFO("Diag: endOfFrame techniques: {}", eofTechniques.empty() ? "(none)" : eofTechniques)
 			diagWasInMenu = inMenu;
 			diagLastReportFrame = frame;
 		}

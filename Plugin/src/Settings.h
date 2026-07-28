@@ -511,6 +511,7 @@ namespace Settings
 		bool IsFilmGrainTypeImproved() const;
 
 		void SetAtEndOfFrame(bool a_bIsAtEndOfFrame) { bIsAtEndOfFrame.store(a_bIsAtEndOfFrame); }
+		bool IsAtEndOfFrame() const { return bIsAtEndOfFrame.load(); }
 
 		RE::BGSSwapChainObject* GetSwapChainObject() const { return swapChainObject; }
 		int32_t GetActualDisplayMode(bool bAcknowledgeScreenshots = false, std::optional<RE::FrameGenerationTech> a_frameGenerationTech = std::nullopt) const;
