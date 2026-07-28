@@ -473,6 +473,13 @@ namespace Hooks
 	// the output format may not be the ones these shaders were built against.
 	static std::atomic<uint64_t> diagUnhandledCopyId{ 0 };
 	static std::atomic<uint32_t> diagUnhandledCopyCount{ 0 };
+	// No Copy-family technique is dispatched at all, so the output encode has to move to a pass that
+	// actually runs. Count the rest of the techniques we patch to find one that covers every frame.
+	static std::atomic<uint32_t> diagPostSharpen{ 0 };
+	static std::atomic<uint32_t> diagFilmGrain{ 0 };
+	static std::atomic<uint32_t> diagColorGradingMerge{ 0 };
+	static std::atomic<uint32_t> diagCAS{ 0 };
+	static std::atomic<uint32_t> diagBink{ 0 };
 
     void Hooks::UploadRootConstants(void* a_renderGraph, void* a2)
     {
@@ -530,6 +537,7 @@ namespace Hooks
 			{
 				Settings::ShaderConstants shaderConstants;
 				Settings::Main::GetSingleton()->GetShaderConstants(shaderConstants);
+				diagFilmGrain.fetch_add(1, std::memory_order_relaxed);
 				uploadRootConstants(shaderConstants, 2, false);  // FilmGrain
 				break;
 			}
@@ -539,6 +547,7 @@ namespace Hooks
 			{
 				Settings::ShaderConstants shaderConstants;
 				Settings::Main::GetSingleton()->GetShaderConstants(shaderConstants, Settings::ShaderConstantsMode::kLUT);
+				diagColorGradingMerge.fetch_add(1, std::memory_order_relaxed);
 				uploadRootConstants(shaderConstants, 4, true);  // ColorGradingMerge / HDRColorGradingMerge
 				break;
 			}
@@ -550,6 +559,7 @@ namespace Hooks
 			{
 				Settings::ShaderConstants shaderConstants;
 				Settings::Main::GetSingleton()->GetShaderConstants(shaderConstants);
+				diagCAS.fetch_add(1, std::memory_order_relaxed);
 				uploadRootConstants(shaderConstants, 4, true);  // ContrastAdaptiveSharpening
 				break;
 			}
@@ -558,6 +568,7 @@ namespace Hooks
 			{
 				Settings::ShaderConstants shaderConstants;
 				Settings::Main::GetSingleton()->GetShaderConstants(shaderConstants);
+				diagPostSharpen.fetch_add(1, std::memory_order_relaxed);
 				uploadRootConstants(shaderConstants, 5, false);  // PostSharpen
 				break;
 			}
@@ -575,6 +586,7 @@ namespace Hooks
 			{
 				Settings::ShaderConstants shaderConstants;
 				Settings::Main::GetSingleton()->GetShaderConstants(shaderConstants);
+				diagBink.fetch_add(1, std::memory_order_relaxed);
 				uploadRootConstants(shaderConstants, 2, false);  // BinkMovie
 				break;
 			}
@@ -974,14 +986,19 @@ namespace Hooks
 		const auto      frame = diagFrames.fetch_add(1, std::memory_order_relaxed) + 1;
 
 		if (inMenu != diagWasInMenu || frame - diagLastReportFrame >= 60) {
-			INFO("Diag: frame {} inMenu={} HDRComposite={} Copy={} CopyAtEndOfFrame={} Scaleform={} unhandledCopy={:#x} x{}",
+			INFO("Diag: frame {} inMenu={} HDRComposite={} Copy={} Scaleform={} PostSharpen={} FilmGrain={} CGM={} CAS={} Bink={} unhandledCopy={:#x} x{}",
 				frame, inMenu,
 				diagHdrComposite.exchange(0, std::memory_order_relaxed),
 				diagCopyTotal.exchange(0, std::memory_order_relaxed),
-				diagCopyAtEndOfFrame.exchange(0, std::memory_order_relaxed),
 				diagScaleform.exchange(0, std::memory_order_relaxed),
+				diagPostSharpen.exchange(0, std::memory_order_relaxed),
+				diagFilmGrain.exchange(0, std::memory_order_relaxed),
+				diagColorGradingMerge.exchange(0, std::memory_order_relaxed),
+				diagCAS.exchange(0, std::memory_order_relaxed),
+				diagBink.exchange(0, std::memory_order_relaxed),
 				diagUnhandledCopyId.load(std::memory_order_relaxed),
 				diagUnhandledCopyCount.exchange(0, std::memory_order_relaxed))
+			diagCopyAtEndOfFrame.store(0, std::memory_order_relaxed);
 			diagWasInMenu = inMenu;
 			diagLastReportFrame = frame;
 		}
